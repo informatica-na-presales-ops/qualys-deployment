@@ -1,8 +1,10 @@
 import apscheduler.schedulers.blocking
 import boto3
 import botocore.exceptions
+import fabric
 import logging
 import os
+import paramiko
 import pathlib
 import signal
 import sys
@@ -22,7 +24,7 @@ class Settings:
             return default
 
     @property
-    def keyfile_location(self):
+    def keyfile_location(self) -> pathlib.Path:
         return pathlib.Path(os.getenv('KEYFILE_LOCATION', '/keys')).resolve()
 
     @property
@@ -42,6 +44,18 @@ class Settings:
         return result
 
     @property
+    def qualys_activation_id(self) -> str:
+        return os.getenv('QUALYS_ACTIVATION_ID')
+
+    @property
+    def qualys_customer_id(self) -> str:
+        return os.getenv('QUALYS_CUSTOMER_ID')
+
+    @property
+    def qualys_rpm(self) -> pathlib.Path:
+        return pathlib.Path(os.getenv('QUALYS_RPM', '/packages/QualysCloudAgent.rpm')).resolve()
+
+    @property
     def run_and_exit(self) -> bool:
         return self.as_bool(os.getenv('RUN_AND_EXIT', 'false'))
 
@@ -55,7 +69,29 @@ class Settings:
     def version(self) -> str:
         return os.getenv('APP_VERSION', 'unknown')
 
-def get_instances(ec2):
+def get_instance_tag(instance, tag_key):
+    if instance.tags is None:
+        return ''
+    for tag in instance.tags:
+        if tag.get('Key') == tag_key:
+            return tag.get('Value')
+    return ''
+
+def get_keyfile(key_name: str):
+    if key_name is None:
+        return
+    s = Settings()
+    keyfile = s.keyfile_location / key_name
+    if keyfile.is_file():
+        return keyfile
+
+def get_ssh_user(instance, default: str = 'ec2-user') -> str:
+    user_from_tag = get_instance_tag(instance, 'machine__ssh_user')
+    if user_from_tag == '':
+        return default
+    return user_from_tag
+
+def yield_instances(ec2):
     filters = [
         {
             'Name': 'instance-state-name',
@@ -64,17 +100,50 @@ def get_instances(ec2):
     ]
     yield from ec2.instances.filter(Filters=filters)
 
+def process_instance(region, instance):
+    if instance.platform == 'windows':
+        return
+    keyfile = get_keyfile(instance.key_name)
+    if keyfile is None:
+        log.error(f'{region} / {instance.id} / Missing keyfile {instance.key_name}')
+        return
+    ssh_user = get_ssh_user(instance)
+    cnx_args = {
+        'key_filename': str(keyfile)
+    }
+
+    log.info(f'trying {region} / {instance.id} / {ssh_user}@{instance.public_ip_address} with {keyfile}')
+    cnx = fabric.Connection(host=instance.public_ip_address, user=ssh_user, connect_kwargs=cnx_args)
+
+    try:
+        result = cnx.run('systemctl is-active qualys-cloud-agent', warn=True, hide=True)
+    except paramiko.ssh_exception.SSHException as e:
+        log.error(f'* ssh connection failed: {e}')
+        log.error('* check that the username (machine__ssh_user tag) and keyfile are correct')
+        return
+    except paramiko.ssh_exception.NoValidConnectionsError as e:
+        log.error(f'* no valid connection: {e}')
+        return
+
+    status = result.stdout.strip()
+    log.info(f'* qualys-cloud-agent is {status}')
+    if status == 'active':
+        return
+    log.info('* checking for presence of `rpm`')
+    result = cnx.run('which rpm', warn=True, hide=True)
+    log.info(f'** [{result.exited}] {result.stdout.strip()}')
+
 def main_job():
     boto_session = boto3.session.Session()
     for region in boto_session.get_available_regions('ec2'):
-        log.info(f'Checking {region}')
+        log.info(f'checking {region}')
         ec2 = boto3.resource('ec2', region_name=region)
         try:
-            for instance in get_instances(ec2):
-                log.debug(f'Checking {instance.id} / {instance.platform} / {instance.key_name}')
+            for instance in yield_instances(ec2):
+                process_instance(region, instance)
         except botocore.exceptions.ClientError as e:
             log.critical(e)
-            log.critical(f'Skipping {region}')
+            log.critical(f'skipping {region}')
 
 def main():
     s = Settings()
