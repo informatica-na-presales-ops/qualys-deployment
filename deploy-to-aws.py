@@ -3,6 +3,7 @@ import boto3
 import botocore.exceptions
 import logging
 import os
+import pathlib
 import signal
 import sys
 
@@ -19,6 +20,10 @@ class Settings:
             return int(value)
         except (ValueError, TypeError):
             return default
+
+    @property
+    def keyfile_location(self):
+        return pathlib.Path(os.getenv('KEYFILE_LOCATION', '/keys')).resolve()
 
     @property
     def log_format(self) -> str:
