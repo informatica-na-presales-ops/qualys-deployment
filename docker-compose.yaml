@@ -1,0 +1,6 @@
+version: '3.8'
+
+services:
+  qualys-deployment:
+    image: ghcr.io/informatica-na-presales-ops/qualys-deployment
+    init: true
