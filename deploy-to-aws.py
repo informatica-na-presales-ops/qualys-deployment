@@ -100,6 +100,13 @@ def yield_instances(ec2):
     ]
     yield from ec2.instances.filter(Filters=filters)
 
+def upload_and_install_rpm(cnx: fabric.Connection):
+    s = Settings()
+    cnx.put(s.qualys_rpm, s.qualys_rpm.name)
+    cnx.sudo(f'rpm --install {s.qualys_rpm.name}', hide=True)
+    cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
+             f'CustomerId={s.qualys_customer_id}', hide=True)
+
 def process_instance(region, instance):
     if instance.platform == 'windows':
         return
@@ -131,7 +138,11 @@ def process_instance(region, instance):
         return
     log.info('* checking for presence of `rpm`')
     result = cnx.run('which rpm', warn=True, hide=True)
-    log.info(f'** [{result.exited}] {result.stdout.strip()}')
+    if not result.ok:
+        log.info(f'** [{result.exited}] {result.stdout.strip()}')
+        return
+    log.info('* uploading and installing agent')
+    upload_and_install_rpm(cnx)
 
 def main_job():
     boto_session = boto3.session.Session()
