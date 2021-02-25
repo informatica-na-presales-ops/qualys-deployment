@@ -1,4 +1,5 @@
 import apscheduler.schedulers.blocking
+import argparse
 import boto3
 import botocore.exceptions
 import fabric
@@ -10,6 +11,11 @@ import signal
 import sys
 
 log = logging.getLogger('qualys_deployment.deploy_to_aws')
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('instance_id', nargs='?')
+    return parser.parse_args()
 
 class Settings:
     @staticmethod
@@ -52,6 +58,10 @@ class Settings:
         return os.getenv('QUALYS_CUSTOMER_ID')
 
     @property
+    def qualys_deb(self) -> pathlib.Path:
+        return pathlib.Path(os.getenv('QUALYS_DEB', '/packages/QualysCloudAgent.deb')).resolve()
+
+    @property
     def qualys_rpm(self) -> pathlib.Path:
         return pathlib.Path(os.getenv('QUALYS_RPM', '/packages/QualysCloudAgent.rpm')).resolve()
 
@@ -71,23 +81,22 @@ class Settings:
 
 def get_instance_tag(instance, tag_key):
     if instance.tags is None:
-        return ''
+        return None
     for tag in instance.tags:
         if tag.get('Key') == tag_key:
             return tag.get('Value')
-    return ''
 
-def get_keyfile(key_name: str):
-    if key_name is None:
+def get_keyfile(keyfile_name: str):
+    if keyfile_name is None:
         return
     s = Settings()
-    keyfile = s.keyfile_location / key_name
+    keyfile = s.keyfile_location / keyfile_name
     if keyfile.is_file():
         return keyfile
 
 def get_ssh_user(instance, default: str = 'ec2-user') -> str:
     user_from_tag = get_instance_tag(instance, 'machine__ssh_user')
-    if user_from_tag == '':
+    if user_from_tag is None:
         return default
     return user_from_tag
 
@@ -100,6 +109,14 @@ def yield_instances(ec2):
     ]
     yield from ec2.instances.filter(Filters=filters)
 
+
+def upload_and_install_deb(cnx: fabric.Connection):
+    s = Settings()
+    cnx.put(s.qualys_deb, s.qualys_deb.name)
+    cnx.sudo(f'dpkg --install {s.qualys_deb.name}')
+    cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
+             f'CustomerId={s.qualys_customer_id}', hide=True)
+
 def upload_and_install_rpm(cnx: fabric.Connection):
     s = Settings()
     cnx.put(s.qualys_rpm, s.qualys_rpm.name)
@@ -110,9 +127,12 @@ def upload_and_install_rpm(cnx: fabric.Connection):
 def process_instance(region, instance):
     if instance.platform == 'windows':
         return
-    keyfile = get_keyfile(instance.key_name)
+    keyfile_name = get_instance_tag(instance, 'machine__ssh_keyfile')
+    if keyfile_name is None:
+        keyfile_name = instance.key_name
+    keyfile = get_keyfile(keyfile_name)
     if keyfile is None:
-        log.error(f'{region} / {instance.id} / Missing keyfile {instance.key_name}')
+        log.error(f'{region} / {instance.id} / Missing keyfile {keyfile_name}')
         return
     ssh_user = get_ssh_user(instance)
     cnx_args = {
@@ -138,23 +158,33 @@ def process_instance(region, instance):
         return
     log.info('* checking for presence of `rpm`')
     result = cnx.run('which rpm', warn=True, hide=True)
-    if not result.ok:
-        log.info(f'** [{result.exited}] {result.stdout.strip()}')
+    if result.ok:
+        log.info('* uploading and installing agent')
+        upload_and_install_rpm(cnx)
         return
-    log.info('* uploading and installing agent')
-    upload_and_install_rpm(cnx)
+    log.info('* checking for presence of `dpkg`')
+    result = cnx.run('which dpkg', warn=True, hide=True)
+    if result.ok:
+        log.info('* uploading and installing agent')
+        upload_and_install_deb(cnx)
 
 def main_job():
     boto_session = boto3.session.Session()
-    for region in boto_session.get_available_regions('ec2'):
-        log.info(f'checking {region}')
+    args = parse_args()
+    if args.instance_id is None:
+        for region in boto_session.get_available_regions('ec2'):
+            log.info(f'checking {region}')
+            ec2 = boto3.resource('ec2', region_name=region)
+            try:
+                for instance in yield_instances(ec2):
+                    process_instance(region, instance)
+            except botocore.exceptions.ClientError as e:
+                log.critical(e)
+                log.critical(f'skipping {region}')
+    else:
+        region, _, instance_id = args.instance_id.partition('/')
         ec2 = boto3.resource('ec2', region_name=region)
-        try:
-            for instance in yield_instances(ec2):
-                process_instance(region, instance)
-        except botocore.exceptions.ClientError as e:
-            log.critical(e)
-            log.critical(f'skipping {region}')
+        process_instance(region, ec2.Instance(instance_id))
 
 def main():
     s = Settings()
