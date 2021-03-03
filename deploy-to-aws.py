@@ -2,8 +2,10 @@ import apscheduler.schedulers.blocking
 import argparse
 import boto3
 import botocore.exceptions
+import datetime
 import enum
 import fabric
+import json
 import logging
 import os
 import paramiko
@@ -15,11 +17,16 @@ log = logging.getLogger('qualys_deployment.deploy_to_aws')
 
 class DeploymentResult(enum.Enum):
     ALREADY_ACTIVE = enum.auto()
+    CACHE_VALID = enum.auto()
     PLATFORM_NOT_SUPPORTED = enum.auto()
     INSTALL_SUCCEEDED = enum.auto()
     CONNECTION_FAILED = enum.auto()
     KEYFILE_MISSING = enum.auto()
     EXCLUDED_WITH_TAG = enum.auto()
+
+    def is_cacheable(self) -> bool:
+        return self in (DeploymentResult.ALREADY_ACTIVE, DeploymentResult.INSTALL_SUCCEEDED,
+                        DeploymentResult.EXCLUDED_WITH_TAG)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -37,6 +44,31 @@ class Settings:
             return int(value)
         except (ValueError, TypeError):
             return default
+
+    @property
+    def cache(self) -> dict[str, datetime.datetime]:
+        raw_data = {}
+        if self.cache_file.exists():
+            with self.cache_file.open() as f:
+                raw_data = json.load(f)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return {k: datetime.datetime.fromisoformat(v)
+                for k, v in raw_data.items()
+                if datetime.datetime.fromisoformat(v) > now - datetime.timedelta(days=self.cache_ttl)}
+
+    @cache.setter
+    def cache(self, value: dict[str, datetime.datetime]):
+        with self.cache_file.open('w') as f:
+            json.dump({k: v.isoformat() for k, v in value.items()}, f, indent=1, sort_keys=True)
+
+    @property
+    def cache_file(self) -> pathlib.Path:
+        return pathlib.Path(os.getenv('CACHE_FILE', '/qualys-deployment.json')).resolve()
+
+    @property
+    def cache_ttl(self) -> int:
+        # number of days a successful installation status is cached
+        return self.as_int(os.getenv('CACHE_TTL'), 7)
 
     @property
     def keyfile_location(self) -> pathlib.Path:
@@ -87,6 +119,9 @@ class Settings:
     @property
     def version(self) -> str:
         return os.getenv('APP_VERSION', 'unknown')
+
+    def prune_cache(self):
+        pass
 
 def get_instance_tag(instance, tag_key):
     if instance.tags is None:
@@ -184,6 +219,7 @@ def process_instance(region, instance) -> DeploymentResult:
 def main_job():
     boto_session = boto3.session.Session()
     args = parse_args()
+    cache = Settings().cache
     if args.instance_id is None:
         results = {}
         for region in boto_session.get_available_regions('ec2'):
@@ -191,7 +227,12 @@ def main_job():
             ec2 = boto3.resource('ec2', region_name=region)
             try:
                 for instance in yield_instances(ec2):
-                    result = process_instance(region, instance)
+                    if f'{region}/{instance.id}' in cache:
+                        result = DeploymentResult.CACHE_VALID
+                    else:
+                        result = process_instance(region, instance)
+                        if result.is_cacheable():
+                            cache.update({f'{region}/{instance.id}': datetime.datetime.now(datetime.timezone.utc)})
                     group = results.get(result, [])
                     group.append(f'{region}/{instance.id}')
                     results.update({result: group})
@@ -206,6 +247,9 @@ def main_job():
         region, _, instance_id = args.instance_id.partition('/')
         ec2 = boto3.resource('ec2', region_name=region)
         result = process_instance(region, ec2.Instance(instance_id))
+        if result.is_cacheable():
+            cache.update({args.instance_id: datetime.datetime.now(datetime.timezone.utc)})
+    Settings().cache = cache
 
 def main():
     s = Settings()
