@@ -72,8 +72,8 @@ class Settings:
     @property
     def run_interval(self) -> int:
         # number of minutes between runs
-        # default run interval is 24 hours
-        return self.as_int(os.getenv('RUN_INTERVAL'), 60 * 24)
+        # default run interval is 23 hours
+        return self.as_int(os.getenv('RUN_INTERVAL'), 60 * 23)
 
     @property
     def version(self) -> str:
