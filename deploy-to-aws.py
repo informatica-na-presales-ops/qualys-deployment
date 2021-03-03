@@ -134,7 +134,7 @@ def upload_and_install_rpm(cnx: fabric.Connection):
              f'CustomerId={s.qualys_customer_id}', hide=True)
 
 def process_instance(region, instance) -> DeploymentResult:
-    install_tag =  get_instance_tag('machine__install_qualys')
+    install_tag = get_instance_tag(instance, 'machine__install_qualys')
     if install_tag == 'false':
         return DeploymentResult.EXCLUDED_WITH_TAG
     if instance.platform == 'windows':

@@ -66,3 +66,8 @@ The files in the folder specified by the environment variable `KEYFILE_LOCATION`
 
 After the tool determines the username and keyfile to use for the connection it attempts to establish a connection to
 the instance's public IP address.
+
+## Excluding an instance
+
+If you want to exclude an instance from having the agent installed by this tool, set a tag on the instance named
+`machine__install_qualys` to `false`.
