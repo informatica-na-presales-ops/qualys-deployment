@@ -2,6 +2,7 @@ import apscheduler.schedulers.blocking
 import argparse
 import boto3
 import botocore.exceptions
+import enum
 import fabric
 import logging
 import os
@@ -11,6 +12,14 @@ import signal
 import sys
 
 log = logging.getLogger('qualys_deployment.deploy_to_aws')
+
+class DeploymentResult(enum.Enum):
+    ALREADY_ACTIVE = enum.auto()
+    PLATFORM_NOT_SUPPORTED = enum.auto()
+    INSTALL_SUCCEEDED = enum.auto()
+    CONNECTION_FAILED = enum.auto()
+    KEYFILE_MISSING = enum.auto()
+    EXCLUDED_WITH_TAG = enum.auto()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -124,22 +133,25 @@ def upload_and_install_rpm(cnx: fabric.Connection):
     cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
              f'CustomerId={s.qualys_customer_id}', hide=True)
 
-def process_instance(region, instance):
+def process_instance(region, instance) -> DeploymentResult:
+    install_tag =  get_instance_tag('machine__install_qualys')
+    if install_tag == 'false':
+        return DeploymentResult.EXCLUDED_WITH_TAG
     if instance.platform == 'windows':
-        return
+        return DeploymentResult.PLATFORM_NOT_SUPPORTED
     keyfile_name = get_instance_tag(instance, 'machine__ssh_keyfile')
     if keyfile_name is None:
         keyfile_name = instance.key_name
     keyfile = get_keyfile(keyfile_name)
     if keyfile is None:
-        log.error(f'{region} / {instance.id} / Missing keyfile {keyfile_name}')
-        return
+        log.error(f'{region}/{instance.id} / Missing keyfile {keyfile_name}')
+        return DeploymentResult.KEYFILE_MISSING
     ssh_user = get_ssh_user(instance)
     cnx_args = {
         'key_filename': str(keyfile)
     }
 
-    log.info(f'trying {region} / {instance.id} / {ssh_user}@{instance.public_ip_address} with {keyfile}')
+    log.info(f'{region}/{instance.id} / trying {ssh_user}@{instance.public_ip_address} with {keyfile}')
     cnx = fabric.Connection(host=instance.public_ip_address, user=ssh_user, connect_kwargs=cnx_args)
 
     try:
@@ -147,44 +159,53 @@ def process_instance(region, instance):
     except paramiko.ssh_exception.SSHException as e:
         log.error(f'* ssh connection failed: {e}')
         log.error('* check that the username (machine__ssh_user tag) and keyfile are correct')
-        return
+        return DeploymentResult.CONNECTION_FAILED
     except paramiko.ssh_exception.NoValidConnectionsError as e:
         log.error(f'* no valid connection: {e}')
-        return
+        return DeploymentResult.CONNECTION_FAILED
 
     status = result.stdout.strip()
     log.info(f'* qualys-cloud-agent is {status}')
     if status == 'active':
-        return
+        return DeploymentResult.ALREADY_ACTIVE
     log.info('* checking for presence of `rpm`')
     result = cnx.run('which rpm', warn=True, hide=True)
     if result.ok:
         log.info('* uploading and installing agent')
         upload_and_install_rpm(cnx)
-        return
+        return DeploymentResult.INSTALL_SUCCEEDED
     log.info('* checking for presence of `dpkg`')
     result = cnx.run('which dpkg', warn=True, hide=True)
     if result.ok:
         log.info('* uploading and installing agent')
         upload_and_install_deb(cnx)
+        return  DeploymentResult.INSTALL_SUCCEEDED
 
 def main_job():
     boto_session = boto3.session.Session()
     args = parse_args()
     if args.instance_id is None:
+        results = {}
         for region in boto_session.get_available_regions('ec2'):
             log.info(f'checking {region}')
             ec2 = boto3.resource('ec2', region_name=region)
             try:
                 for instance in yield_instances(ec2):
-                    process_instance(region, instance)
+                    result = process_instance(region, instance)
+                    group = results.get(result, [])
+                    group.append(f'{region}/{instance.id}')
+                    results.update({result: group})
             except botocore.exceptions.ClientError as e:
                 log.critical(e)
                 log.critical(f'skipping {region}')
+        for result, group in results.items():
+            log.info(f'### {result} ({len(group)})')
+            for item in group:
+                log.info(f' {item}')
     else:
         region, _, instance_id = args.instance_id.partition('/')
         ec2 = boto3.resource('ec2', region_name=region)
-        process_instance(region, ec2.Instance(instance_id))
+        result = process_instance(region, ec2.Instance(instance_id))
 
 def main():
     s = Settings()
