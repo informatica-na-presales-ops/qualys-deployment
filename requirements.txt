@@ -1,5 +1,5 @@
 --extra-index-url https://alpine-wheels.github.io/index
 
 APScheduler==3.7.0
-boto3==1.17.17
+boto3==1.17.22
 fabric==2.6.0
