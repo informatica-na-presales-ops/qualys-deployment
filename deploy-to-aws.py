@@ -20,6 +20,8 @@ class DeploymentResult(enum.Enum):
     CACHE_VALID = enum.auto()
     PLATFORM_NOT_SUPPORTED = enum.auto()
     INSTALL_SUCCEEDED = enum.auto()
+    INSTALL_FAILED = enum.auto()
+    UPLOAD_FAILED = enum.auto()
     CONNECTION_FAILED = enum.auto()
     KEYFILE_MISSING = enum.auto()
     EXCLUDED_WITH_TAG = enum.auto()
@@ -120,9 +122,6 @@ class Settings:
     def version(self) -> str:
         return os.getenv('APP_VERSION', 'unknown')
 
-    def prune_cache(self):
-        pass
-
 def get_instance_tag(instance, tag_key):
     if instance.tags is None:
         return None
@@ -155,17 +154,27 @@ def yield_instances(ec2):
 
 def upload_and_install_deb(cnx: fabric.Connection):
     s = Settings()
-    cnx.put(s.qualys_deb, s.qualys_deb.name)
+    try:
+        cnx.put(s.qualys_deb, s.qualys_deb.name)
+    except OSError as e:
+        log.error(f'* os error: {e}')
+        return DeploymentResult.UPLOAD_FAILED
     cnx.sudo(f'dpkg --install {s.qualys_deb.name}')
     cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
              f'CustomerId={s.qualys_customer_id}', hide=True)
+    return DeploymentResult.INSTALL_SUCCEEDED
 
 def upload_and_install_rpm(cnx: fabric.Connection):
     s = Settings()
-    cnx.put(s.qualys_rpm, s.qualys_rpm.name)
+    try:
+        cnx.put(s.qualys_rpm, s.qualys_rpm.name)
+    except OSError as e:
+        log.error(f'* os error: {e}')
+        return DeploymentResult.UPLOAD_FAILED
     cnx.sudo(f'rpm --install {s.qualys_rpm.name}', hide=True)
     cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
              f'CustomerId={s.qualys_customer_id}', hide=True)
+    return DeploymentResult.INSTALL_SUCCEEDED
 
 def process_instance(region, instance) -> DeploymentResult:
     install_tag = get_instance_tag(instance, 'machine__install_qualys')
@@ -185,8 +194,8 @@ def process_instance(region, instance) -> DeploymentResult:
         'key_filename': str(keyfile)
     }
 
-    log.info(f'{region}/{instance.id} / trying {ssh_user}@{instance.public_ip_address} with {keyfile}')
-    cnx = fabric.Connection(host=instance.public_ip_address, user=ssh_user, connect_kwargs=cnx_args)
+    log.info(f'{region}/{instance.id} / trying {ssh_user}@{instance.public_dns_name} with {keyfile}')
+    cnx = fabric.Connection(host=instance.public_dns_name, user=ssh_user, connect_kwargs=cnx_args)
 
     try:
         result = cnx.run('systemctl is-active qualys-cloud-agent', warn=True, hide=True)
@@ -209,14 +218,12 @@ def process_instance(region, instance) -> DeploymentResult:
     result = cnx.run('which rpm', warn=True, hide=True)
     if result.ok:
         log.info('* uploading and installing agent')
-        upload_and_install_rpm(cnx)
-        return DeploymentResult.INSTALL_SUCCEEDED
+        return upload_and_install_rpm(cnx)
     log.info('* checking for presence of `dpkg`')
     result = cnx.run('which dpkg', warn=True, hide=True)
     if result.ok:
         log.info('* uploading and installing agent')
-        upload_and_install_deb(cnx)
-        return  DeploymentResult.INSTALL_SUCCEEDED
+        return upload_and_install_deb(cnx)
 
 def main_job():
     boto_session = boto3.session.Session()
