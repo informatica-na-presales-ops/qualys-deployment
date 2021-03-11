@@ -3,7 +3,7 @@ FROM python:3.9.2-alpine3.13
 COPY requirements.txt /qualys-deployment/requirements.txt
 RUN /usr/local/bin/pip install --no-cache-dir --requirement /qualys-deployment/requirements.txt
 
-ENV APP_VERSION="2021.0" \
+ENV APP_VERSION="2021.1" \
     PYTHONUNBUFFERED="1" \
     TZ="Etc/UTC"
 
