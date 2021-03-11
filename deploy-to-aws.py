@@ -153,7 +153,6 @@ def yield_instances(ec2):
     ]
     yield from ec2.instances.filter(Filters=filters)
 
-
 def upload_and_install_deb(cnx: fabric.Connection):
     s = Settings()
     cnx.put(s.qualys_deb, s.qualys_deb.name)
@@ -197,6 +196,9 @@ def process_instance(region, instance) -> DeploymentResult:
         return DeploymentResult.CONNECTION_FAILED
     except paramiko.ssh_exception.NoValidConnectionsError as e:
         log.error(f'* no valid connection: {e}')
+        return DeploymentResult.CONNECTION_FAILED
+    except TimeoutError as e:
+        log.error(f'* timeout: {e}')
         return DeploymentResult.CONNECTION_FAILED
 
     status = result.stdout.strip()
