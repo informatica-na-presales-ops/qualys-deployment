@@ -15,6 +15,7 @@ import sys
 
 log = logging.getLogger('qualys_deployment.deploy_to_aws')
 
+
 class DeploymentResult(enum.Enum):
     ALREADY_ACTIVE = enum.auto()
     CACHE_VALID = enum.auto()
@@ -30,10 +31,17 @@ class DeploymentResult(enum.Enum):
         return self in (DeploymentResult.ALREADY_ACTIVE, DeploymentResult.INSTALL_SUCCEEDED,
                         DeploymentResult.EXCLUDED_WITH_TAG)
 
+    def report_details(self) -> bool:
+        return self in (DeploymentResult.INSTALL_SUCCEEDED, DeploymentResult.INSTALL_FAILED,
+                        DeploymentResult.UPLOAD_FAILED, DeploymentResult.CONNECTION_FAILED,
+                        DeploymentResult.KEYFILE_MISSING)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('instance_id', nargs='?')
     return parser.parse_args()
+
 
 class Settings:
     @staticmethod
@@ -122,12 +130,14 @@ class Settings:
     def version(self) -> str:
         return os.getenv('APP_VERSION', 'unknown')
 
+
 def get_instance_tag(instance, tag_key):
     if instance.tags is None:
         return None
     for tag in instance.tags:
         if tag.get('Key') == tag_key:
             return tag.get('Value')
+
 
 def get_keyfile(keyfile_name: str):
     if keyfile_name is None:
@@ -137,11 +147,13 @@ def get_keyfile(keyfile_name: str):
     if keyfile.is_file():
         return keyfile
 
+
 def get_ssh_user(instance, default: str = 'ec2-user') -> str:
     user_from_tag = get_instance_tag(instance, 'machine__ssh_user')
     if user_from_tag is None:
         return default
     return user_from_tag
+
 
 def yield_instances(ec2):
     filters = [
@@ -151,6 +163,7 @@ def yield_instances(ec2):
         }
     ]
     yield from ec2.instances.filter(Filters=filters)
+
 
 def upload_and_install_deb(cnx: fabric.Connection):
     s = Settings()
@@ -164,6 +177,7 @@ def upload_and_install_deb(cnx: fabric.Connection):
              f'CustomerId={s.qualys_customer_id}', hide=True)
     return DeploymentResult.INSTALL_SUCCEEDED
 
+
 def upload_and_install_rpm(cnx: fabric.Connection):
     s = Settings()
     try:
@@ -175,6 +189,7 @@ def upload_and_install_rpm(cnx: fabric.Connection):
     cnx.sudo(f'/usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh ActivationId={s.qualys_activation_id} '
              f'CustomerId={s.qualys_customer_id}', hide=True)
     return DeploymentResult.INSTALL_SUCCEEDED
+
 
 def process_instance(region, instance) -> DeploymentResult:
     install_tag = get_instance_tag(instance, 'machine__install_qualys')
@@ -225,6 +240,7 @@ def process_instance(region, instance) -> DeploymentResult:
         log.info('* uploading and installing agent')
         return upload_and_install_deb(cnx)
 
+
 def main_job():
     boto_session = boto3.session.Session()
     args = parse_args()
@@ -250,8 +266,9 @@ def main_job():
                 log.critical(f'skipping {region}')
         for result, group in results.items():
             log.info(f'### {result} ({len(group)})')
-            for item in group:
-                log.info(f' {item}')
+            if result.report_details():
+                for item in group:
+                    log.info(f' {item} {result.name}')
     else:
         region, _, instance_id = args.instance_id.partition('/')
         ec2 = boto3.resource('ec2', region_name=region)
@@ -259,6 +276,7 @@ def main_job():
         if result.is_cacheable():
             cache.update({args.instance_id: datetime.datetime.now(datetime.timezone.utc)})
     Settings().cache = cache
+
 
 def main():
     s = Settings()
@@ -281,8 +299,10 @@ def main():
     scheduler.add_job(main_job)
     scheduler.start()
 
+
 def handle_sigterm(_signal, _frame):
     sys.exit()
+
 
 if __name__ == '__main__':
     signal.signal(signal.SIGTERM, handle_sigterm)
