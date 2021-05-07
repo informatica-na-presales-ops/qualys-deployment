@@ -56,6 +56,10 @@ class Settings:
             return default
 
     @property
+    def aws_profile(self) -> str:
+        return os.getenv('AWS_PROFILE')
+
+    @property
     def cache(self) -> dict[str, datetime.datetime]:
         raw_data = {}
         if self.cache_file.exists():
@@ -242,7 +246,7 @@ def process_instance(region, instance) -> DeploymentResult:
 
 
 def main_job():
-    boto_session = boto3.session.Session()
+    boto_session = boto3.session.Session(profile_name=Settings().aws_profile)
     args = parse_args()
     cache = Settings().cache
     if args.instance_id is None:

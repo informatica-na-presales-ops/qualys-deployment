@@ -20,6 +20,10 @@ The following environment variables are required:
 * `QUALYS_ACTIVATION_ID`
 * `QUALYS_CUSTOMER_ID`
 
+If you use AWS profiles to manage connections, you can set a profile name with this environment variable:
+
+* `AWS_PROFILE`
+
 The following environment variables have defaults, but you may need to set them for you environment:
 
 * `KEYFILE_LOCATION`  
